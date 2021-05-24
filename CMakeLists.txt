@@ -74,7 +74,7 @@ ADD_EXECUTABLE(blockd blockd.c)
 TARGET_LINK_LIBRARIES(blockd fstools ubus blobmsg_json ${json})
 INSTALL(TARGETS blockd RUNTIME DESTINATION sbin)
 
-ADD_EXECUTABLE(block block.c probe.c probe-libblkid.c)
+ADD_EXECUTABLE(block block.c probe.c probe-libblkid.c probe-mtdecc.c)
 IF(DEFINED CMAKE_UBIFS_EXTROOT)
 	ADD_DEFINITIONS(-DUBIFS_EXTROOT)
 	TARGET_LINK_LIBRARIES(block blkid-tiny dl uci ubox ubus blobmsg_json ubi-utils ${json})

@@ -61,6 +61,9 @@ probe_path(const char *path)
 {
 	struct probe_info *info;
 
+	if (check_invalid_mtdblock(path))
+		return(NULL);
+
 	info = probe_path_tiny(path);
 
 	if (!info)
