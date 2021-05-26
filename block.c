@@ -498,6 +498,29 @@ static struct probe_info* _probe_path(char *path)
 	return probe_path(path);
 }
 
+/* Doesn't do us any good to get null result on hotplug remove */
+static struct probe_info *fake_probe(const char *devpath)
+{
+	struct probe_info *info;
+	const char *none = "none";
+	char *type, *dev, *uuid, *label, *version;
+
+	info = calloc_a(sizeof(*info),
+			&type,    strlen(none)     + 1,
+			&dev,     strlen(devpath)  + 1,
+			&uuid,    strlen(none)     + 1,
+			&label,   strlen(none)     + 1,
+			&version, strlen(none)     + 1);
+
+	info->type = strcpy(type, none);
+	info->dev = strcpy(dev, devpath);
+	info->uuid = NULL;
+	info->label = NULL;
+	info->version = NULL;
+
+	return (info);
+}
+
 static int _cache_load(const char *path)
 {
 	int gl_flags = GLOB_NOESCAPE | GLOB_MARK;
@@ -536,6 +559,91 @@ static void cache_load(int mtd)
 	_cache_load("/dev/mapper/*");
 }
 
+static char * find_devpath( char *devname )
+{
+	/* last entry is default if nothing found */
+	static const char *plist[] = { "/dev/", "/dev/mapper/", "/dev/", NULL };
+	const char **p;
+	struct stat dev_s;
+	char *devpath = NULL;
+
+	for (p = plist; *p; p++) {
+		if (devpath)
+		  free(devpath);
+		if (asprintf(&devpath, "%s%s", *p, devname) == -1)
+			exit(ENOMEM);
+		if (!stat(devpath, &dev_s) && S_ISBLK(dev_s.st_mode))
+			break;
+	}
+	return devpath;
+}
+
+static struct probe_info *match_device( char *devpath, int hotplug )
+{
+	struct probe_info *pr;
+	struct stat dev_s;
+	ssize_t major, minor;
+
+	if ( !stat(devpath, &dev_s) &&
+	     S_ISBLK(dev_s.st_mode) ) {
+		major = major(dev_s.st_rdev);
+		minor = minor(dev_s.st_rdev);
+	} else if (hotplug) {
+		ULOG_WARN("match_device: %s %s\n",
+			  devpath, strerror(errno));
+		major = atoi(getenv("MAJOR"));
+		minor = atoi(getenv("MINOR"));
+		if (0 == (major + minor))
+			return NULL;
+	} else {
+		return NULL;
+	}
+
+	list_for_each_entry(pr, &devices, list)
+		if ( (!stat(pr->dev, &dev_s)) &&
+		     (S_ISBLK(dev_s.st_mode)) &&
+		     (major == major(dev_s.st_rdev)) &&
+		     (minor == minor(dev_s.st_rdev)) )
+			return ( pr );
+	return NULL;
+}
+
+static struct probe_info *cache_load_one(char *dev, int type, char *action)
+{
+	char *devpath;
+	struct probe_info *pr;
+
+	/* ubi has special case if block exists so check them all. */
+	if (dev[0] == 'u' && dev[1] == 'b' && dev[2] == 'i') {
+		_cache_load("/dev/ubiblock*");
+	}
+
+	/* dm- can be random so try to find /dev/mapper */
+	if (dev[0] == 'd' && dev[1] == 'm' && dev[2] == '-') {
+		_cache_load("/dev/mapper/*");
+	}
+
+	/* hotplug uses /dev, autofs may use /dev/mapper */
+	devpath = find_devpath( dev );
+
+	/* device major/minor already in list we are done. */
+	if ((pr = match_device(devpath, (TYPE_HOTPLUG == type)))) {
+		free(devpath);
+		return pr;
+	}
+
+	/* otherwise probe new device */
+	pr = _probe_path(devpath);
+
+	/* Don't let plug-out fail */
+	if (! pr && !strcmp(action, "remove"))
+		pr = fake_probe(devpath);
+
+	free( devpath );
+	if (pr)
+		list_add_tail(&pr->list, &devices);
+	return pr;
+}
 
 static struct probe_info* find_block_info(char *uuid, char *label, char *path)
 {
@@ -559,7 +667,7 @@ static struct probe_info* find_block_info(char *uuid, char *label, char *path)
 	return NULL;
 }
 
-static char* find_mount_point(char *block)
+static char* find_mount_point(char *block, int hotplug)
 {
 	FILE *fp = fopen("/proc/self/mountinfo", "r");
 	static char line[256];
@@ -568,10 +676,22 @@ static char* find_mount_point(char *block)
 	int rstat;
 	unsigned int minor, major;
 
+
 	if (!fp)
 		return NULL;
 
 	rstat = stat(block, &s);
+	/* Check carefully in case we want to use outside of hotplug */
+	if ((rstat && hotplug) &&
+	    (tmp = getenv("MAJOR")) &&
+	    (rstat = atoi(tmp)) &&
+	    (tmp = getenv("MINOR"))) {
+		ULOG_WARN("Hotplug umount from ENV %s %d %d\n",
+			  block, rstat, atoi(tmp));
+		s.st_rdev = makedev(rstat, atoi(tmp));
+		s.st_mode = S_IFBLK;
+		rstat = 0;
+	}
 
 	while (fgets(line, sizeof(line), fp)) {
 		pos = strchr(line, ' ');
@@ -654,7 +774,7 @@ static int print_block_uci(struct probe_info *pr)
 	if (!strcmp(pr->type, "swap")) {
 		printf("config 'swap'\n");
 	} else {
-		char *mp = find_mount_point(pr->dev);
+		char *mp = find_mount_point(pr->dev, false);
 
 		printf("config 'mount'\n");
 		if (mp) {
@@ -677,7 +797,7 @@ static int print_block_info(struct probe_info *pr)
 {
 	static char *mp;
 
-	mp = find_mount_point(pr->dev);
+	mp = find_mount_point(pr->dev, false);
 	printf("%s:", pr->dev);
 	if (pr->uuid)
 		printf(" UUID=\"%s\"", pr->uuid);
@@ -1019,7 +1139,7 @@ static int mount_device(struct probe_info *pr, int type)
 	if (m && m->extroot)
 		return -1;
 
-	mp = find_mount_point(pr->dev);
+	mp = find_mount_point(pr->dev, false);
 	if (mp) {
 		if (m && m->type == TYPE_MOUNT && m->target && strcmp(m->target, mp)) {
 			ULOG_ERR("%s is already mounted on %s\n", pr->dev, mp);
@@ -1111,7 +1231,9 @@ static int umount_device(char *path, int type, bool all)
 	char *mp;
 	int err;
 
-	mp = find_mount_point(path);
+	/* Hotplug umount will fail to stat path so use env instead */
+	mp = find_mount_point(path, (TYPE_HOTPLUG == type));
+
 	if (!mp)
 		return -1;
 
@@ -1140,7 +1262,7 @@ static int umount_device(char *path, int type, bool all)
 
 static int mount_action(char *action, char *device, int type)
 {
-	char *path = NULL;
+	char *probe_dev = device;
 	struct probe_info *pr;
 
 	if (!action || !device)
@@ -1149,20 +1271,17 @@ static int mount_action(char *action, char *device, int type)
 	if (config_load(NULL))
 		return -1;
 
-	cache_load(1);
-
-	list_for_each_entry(pr, &devices, list)
-		if (!strcmp(basename(pr->dev), device))
-			path = pr->dev;
-
-	if (!path)
+	pr = cache_load_one(device, type, action);
+	ULOG_WARN("mount_action %s dev %s match %s\n", action, device, (pr?pr->dev:"<none>"));
+	if (!pr)
 		return -1;
+	probe_dev = basename(pr->dev);
 
 	if (!strcmp(action, "remove")) {
 		if (type == TYPE_HOTPLUG)
-			blockd_notify("hotplug", device, NULL, NULL);
+			blockd_notify("hotplug", probe_dev, NULL, NULL);
 
-		umount_device(path, type, true);
+		umount_device(pr->dev, type, true);
 
 		return 0;
 	} else if (strcmp(action, "add")) {
@@ -1171,7 +1290,7 @@ static int mount_action(char *action, char *device, int type)
 		return -1;
 	}
 
-	return mount_device(find_block_info(NULL, NULL, path), type);
+	return mount_device(pr, type);
 }
 
 static int main_hotplug(int argc, char **argv)
@@ -1205,7 +1324,7 @@ static int main_autofs(int argc, char **argv)
 				continue;
 
 			blockd_notify("hotplug", pr->dev, m, pr);
-			if ((!m || !m->autofs) && (mp = find_mount_point(pr->dev))) {
+			if ((!m || !m->autofs) && (mp = find_mount_point(pr->dev, false))) {
 				blockd_notify("mount", pr->dev, NULL, NULL);
 				free(mp);
 			}
@@ -1699,6 +1818,8 @@ static int main_info(int argc, char **argv)
 			continue;
 		}
 		pr = find_block_info(NULL, NULL, argv[i]);
+		if (!pr)
+			pr=match_device(argv[i], false);
 		if (pr)
 			print_block_info(pr);
 	}
