@@ -879,6 +879,41 @@ static void check_filesystem(struct probe_info *pr)
 	}
 }
 
+/* LVM volumes are scanned rather than mounted */
+static void lvm_pvscan(struct probe_info *pr)
+{
+	pid_t pid;
+	struct stat statbuf;
+	const char *pvscan = "/sbin/pvscan";
+
+	if (stat(pvscan, &statbuf) < 0) {
+		ULOG_ERR("lvm_pvscan: %s not found\n", pvscan);
+		return;
+	}
+
+	pid = fork();
+	if (!pid) {
+		if (pr)
+			/* plug-in scan device */
+			execl(pvscan, pvscan, "--cache", "-aay", pr->dev, NULL);
+		else
+			/* plug-out scan for missing devices */
+			execl(pvscan, pvscan, "--cache", NULL);
+
+		exit(EXIT_FAILURE);
+	} else if (pid > 0) {
+		int status;
+
+		waitpid(pid, &status, 0);
+		if (WIFEXITED(status) && WEXITSTATUS(status))
+			ULOG_ERR("lvm_pvscan: %s returned %d\n", pvscan,
+				 WEXITSTATUS(status));
+		if (WIFSIGNALED(status))
+			ULOG_ERR("lvm_pvscan: %s terminated by %s\n", pvscan,
+				 strsignal(WTERMSIG(status)));
+	}
+}
+
 static void handle_swapfiles(bool on)
 {
 	struct stat s;
@@ -1281,7 +1316,11 @@ static int mount_action(char *action, char *device, int type)
 		if (type == TYPE_HOTPLUG)
 			blockd_notify("hotplug", probe_dev, NULL, NULL);
 
-		umount_device(pr->dev, type, true);
+		if ((TYPE_HOTPLUG == type) &&
+		   (!strcmp(pr->type, "LVM2_member")))
+			lvm_pvscan( NULL );
+		else
+			umount_device(pr->dev, type, true);
 
 		return 0;
 	} else if (strcmp(action, "add")) {
@@ -1290,7 +1329,13 @@ static int mount_action(char *action, char *device, int type)
 		return -1;
 	}
 
-	return mount_device(pr, type);
+	if ((TYPE_HOTPLUG == type) &&
+	    (!strcmp(pr->type, "LVM2_member"))) {
+		lvm_pvscan( pr );
+		return 0;
+	} else {
+		return mount_device(pr, type);
+	}
 }
 
 static int main_hotplug(int argc, char **argv)
