@@ -584,6 +584,8 @@ static struct probe_info *match_device( char *devpath, int hotplug )
 	struct stat dev_s;
 	ssize_t major, minor;
 
+	ULOG_WARN("match_device: path %s\n", devpath); // dja remove
+
 	if ( !stat(devpath, &dev_s) &&
 	     S_ISBLK(dev_s.st_mode) ) {
 		major = major(dev_s.st_rdev);
@@ -605,6 +607,9 @@ static struct probe_info *match_device( char *devpath, int hotplug )
 		     (major == major(dev_s.st_rdev)) &&
 		     (minor == minor(dev_s.st_rdev)) )
 			return ( pr );
+
+	ULOG_WARN("match_device: %s %d %d not found, probe required\n",
+		  devpath, major, minor); // dja remove
 	return NULL;
 }
 
@@ -1174,6 +1179,7 @@ static int mount_device(struct probe_info *pr, int type)
 	if (m && m->extroot)
 		return -1;
 
+	ULOG_WARN("Mount requested:  %s, checking existing mounts.\n", pr->dev); // dja remove
 	mp = find_mount_point(pr->dev, false);
 	if (mp) {
 		if (m && m->type == TYPE_MOUNT && m->target && strcmp(m->target, mp)) {
@@ -1231,6 +1237,7 @@ static int mount_device(struct probe_info *pr, int type)
 	}
 
 	/* Mount the device */
+	ULOG_WARN("Mount required:  %s -> %s\n", pr->dev, target); // dja remove
 
 	if (check_fs)
 		check_filesystem(pr);
@@ -1269,8 +1276,10 @@ static int umount_device(char *path, int type, bool all)
 	/* Hotplug umount will fail to stat path so use env instead */
 	mp = find_mount_point(path, (TYPE_HOTPLUG == type));
 
-	if (!mp)
+	if (!mp) {
+		ULOG_WARN("umount_device: %s not mounted\n", path); // dja remove with bracket.
 		return -1;
+	}
 
 	/* Skip all internal root related volumes.  Caller handles extroot */
 	if (!all && (
@@ -1287,7 +1296,7 @@ static int umount_device(char *path, int type, bool all)
 		ULOG_ERR("unmounting %s (%s) failed (%d) - %m\n", path, mp,
 			 errno);
 	} else {
-		ULOG_INFO("unmounted %s (%s)\n", path, mp);
+		ULOG_WARN("unmounted %s (%s)\n", path, mp);  // dja -- s/b INFO
 		rmdir(mp);
 	}
 
@@ -1340,6 +1349,7 @@ static int mount_action(char *action, char *device, int type)
 
 static int main_hotplug(int argc, char **argv)
 {
+	ULOG_WARN("hotplug: %s %s\n", getenv("ACTION"), getenv("DEVNAME")); // dja remove
 	return mount_action(getenv("ACTION"), getenv("DEVNAME"), TYPE_HOTPLUG);
 }
 
