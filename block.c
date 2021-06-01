@@ -1114,8 +1114,13 @@ static int umount_device(char *path, int type, bool all)
 	mp = find_mount_point(path);
 	if (!mp)
 		return -1;
-	if (!strcmp(mp, "/") && !all)
-		return 0;
+
+	/* Skip all internal root related volumes.  Caller handles extroot */
+	if (!all && (
+		     !strcmp(mp, "/") ||
+		     !strcmp(mp, "/rom") ||
+		     !strcmp(mp, "/rom/overlay")))
+	  return 0;
 
 	if (type != TYPE_AUTOFS)
 		blockd_notify("umount", basename(path), NULL, NULL);
