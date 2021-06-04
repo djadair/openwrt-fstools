@@ -41,6 +41,7 @@ struct device {
 
 static struct uloop_fd fd_autofs_read;
 static int fd_autofs_write = 0;
+static struct stat autofs_mp_stat;
 static struct ubus_auto_conn conn;
 struct blob_buf bb = { 0 };
 
@@ -501,8 +502,10 @@ static void autofs_read_handler(struct uloop_fd *u, unsigned int events)
 {
 	union autofs_v5_packet_union pktu;
 	const struct autofs_v5_packet *pkt;
-	int cmd = AUTOFS_IOC_READY;
 	struct stat st;
+	struct device *device;
+	char *mnt;
+	int cmd = AUTOFS_IOC_READY;
 
 	while (read(u->fd, &pktu, sizeof(pktu)) == -1) {
 		if (errno != EINTR)
@@ -517,9 +520,24 @@ static void autofs_read_handler(struct uloop_fd *u, unsigned int events)
 
 	pkt = &pktu.missing_indirect;
         ULOG_ERR("kernel is requesting a mount -> %s\n", pkt->name);
-	if (lstat(pkt->name, &st) == -1)
-		if (block("autofs", "add", (char *)pkt->name))
+	/*
+	 * if MP exists send "ready"
+	 *   second part of check detects zombie mounts --
+	 *   valid target should have target dev not autofs.
+	 */
+	if (asprintf(&mnt, "%s%s", AUTOFS_MOUNT_PATH, pkt->name) == -1)
+		exit(ENOMEM);
+	if ((lstat(mnt, &st) == -1) ||
+	    (S_ISDIR(st.st_mode) && st.st_dev == autofs_mp_stat.st_dev)) {
+		rmdir(mnt);
+		device = vlist_find(&devices, pkt->name, device, node);
+		/* Map doesn't exist or mount fails send "fail" */
+		if (!device || !device->target ||
+		    lstat(device->target, &st) || ! S_ISLNK(st.st_mode) ||
+		    block("autofs", "add", (char *)pkt->name))
 			cmd = AUTOFS_IOC_FAIL;
+	}
+	free(mnt);
 
 	if (ioctl(fd_autofs_write, cmd, pkt->wait_queue_token) < 0)
 		ULOG_ERR("failed to report back to kernel\n");
@@ -562,6 +580,7 @@ static int autofs_mount(void)
 		return -1;
 	}
 	close(pipefd[1]);
+	stat(AUTOFS_MOUNT_PATH, &autofs_mp_stat);
 	fd_autofs_read.fd = pipefd[0];
 	fd_autofs_read.cb = autofs_read_handler;
 	uloop_fd_add(&fd_autofs_read, ULOOP_READ);
