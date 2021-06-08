@@ -88,13 +88,17 @@ static char*
 _find_mount_point(char *device)
 {
 	char *dev, *mp;
+	static const char *plist[] = { "/dev/mapper/", "/dev/", NULL };
+	const char **p;
 
-	if (asprintf(&dev, "/dev/%s", device) == -1)
-		exit(ENOMEM);
+	for (p = plist; *p; p++) {
+		if (asprintf(&dev, "%s%s", *p, device) == -1)
+			exit(ENOMEM);
 
-	mp = find_mount_point(dev, 0);
-	free(dev);
-
+		mp = find_mount_point(dev, 0);
+		free(dev);
+		if (mp) break;
+	}
 	return mp;
 }
 
