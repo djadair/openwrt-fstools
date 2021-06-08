@@ -179,11 +179,13 @@ static void device_mount_remove_hotplug_cb(struct uloop_process *p, int stat)
 	struct device *device = hctx->priv;
 	char *mp;
 
+	ULOG_WARN("Removing symlink %s (%s)\n", device->target, device->name); // dja remove.
 	if (device->target)
 		unlink(device->target);
 
 	mp = _find_mount_point(device->name);
 	if (mp) {
+		ULOG_WARN("Requesting umount %s (%s)\n", mp, device->name); // dja remove.
 		block("autofs", "remove", device->name);
 		free(mp);
 	}
@@ -194,6 +196,7 @@ static void device_mount_remove_hotplug_cb(struct uloop_process *p, int stat)
 
 static void device_mount_remove(struct device *device)
 {
+	ULOG_WARN("device_mount_remove %s (%s)\n", device->target, device->name); // dja remove.
 	hotplug_call_mount("remove", device->name,
 			   device_mount_remove_hotplug_cb, device);
 }
@@ -241,6 +244,7 @@ device_move(struct device *device_o, struct device *device_n)
 
 		free(path);
 	} else {
+		ULOG_WARN("Moving device %s -> %s\n", device_o->target, device_n->target); // dja remove
 		mkdir(device_n->target, 0755);
 		if (mount(device_o->target, device_n->target, NULL, MS_MOVE, NULL))
 			rmdir(device_n->target);
