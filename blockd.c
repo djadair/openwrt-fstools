@@ -230,14 +230,16 @@ device_move(struct device *device_o, struct device *device_n)
 {
 	char *path;
 
+	if (device_o->autofs)
+		unlink(device_o->target);
+
 	if (device_o->autofs != device_n->autofs)
 		return -1;
 
 	if (device_o->anon || device_n->anon)
 		return -1;
 
-	if (device_o->autofs) {
-		unlink(device_o->target);
+	if (device_n->autofs) {
 		if (asprintf(&path, "/tmp/run/blockd/%s", device_n->name) == -1)
 			exit(ENOMEM);
 
@@ -386,16 +388,39 @@ block_hotplug(struct ubus_context *ctx, struct ubus_object *obj,
 		}
 		vlist_add(&devices, &device->node, device->name);
 
-		if (old && !device_move(old, device)) {
-			if (device->autofs) {
-				device_mount_remove(old);
+		/* Don't do anything if target unchanged. We should
+		 * only get redundant add requests due to autofs or
+		 * block autofs start aka service blockd reload. In
+		 * other cases block will only send on new mount.
+		 */
+		if (!old || (old->autofs != device->autofs) ||
+		    strcmp(old->target,device->target)) {
+			if (old && !device_move(old, device)) {
+				if (device->autofs) {
+					/* This has a race, add completes before remove
+					 * but should not hurt with different targets.
+					 */
+					device_mount_remove(old);
+					device_mount_add(device);
+					old = NULL;
+				} else {
+					/* events for mount move safe since
+					 * filesystem never unavailable ?
+					 */
+					hotplug_call_mount("remove", devname, NULL, NULL);	
+					hotplug_call_mount("add", devname, NULL, NULL);	
+				}
+			} else if (device->autofs) {
 				device_mount_add(device);
-			} else {
+			} else if (old) {
+				if (old->autofs)
+					device_mount_remove(old);
+				/* Can this be removed ??? */
 				block("mount", NULL, NULL);
 			}
-		} else if (device->autofs) {
-			device_mount_add(device);
 		}
+		if (old)
+			free(old);
 	}
 
 	return 0;
