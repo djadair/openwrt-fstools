@@ -60,11 +60,19 @@ struct probe_info *
 probe_path(const char *path)
 {
 	struct probe_info *info;
+	struct stat s;
+
+	/* No point in probing if device does not exist */
+	if (stat(path, &s) < 0)
+		return NULL;
 
 	info = probe_path_tiny(path);
 
 	if (!info)
 		info = probe_path_libblkid(path);
+
+	if (info)
+		info->st_rdev = s.st_rdev;
 
 	return info;
 }

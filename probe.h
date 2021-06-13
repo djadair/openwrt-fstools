@@ -24,6 +24,7 @@ struct probe_info {
 	char *uuid;
 	char *label;
 	char *version;
+	dev_t st_rdev;
 };
 
 struct probe_info * probe_path(const char *path);

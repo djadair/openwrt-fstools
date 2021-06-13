@@ -35,6 +35,7 @@ struct device {
 	struct blob_attr *msg;
 	char *name;
 	char *target;
+	char *devno;
 	int autofs;
 	int anon;
 };
@@ -55,6 +56,7 @@ enum {
 	MOUNT_AUTOFS,
 	MOUNT_ANON,
 	MOUNT_REMOVE,
+	MOUNT_DEVNO,
 	__MOUNT_MAX
 };
 
@@ -68,15 +70,18 @@ static const struct blobmsg_policy mount_policy[__MOUNT_MAX] = {
 	[MOUNT_AUTOFS] = { .name = "autofs", .type = BLOBMSG_TYPE_INT32 },
 	[MOUNT_ANON] = { .name = "anon", .type = BLOBMSG_TYPE_INT32 },
 	[MOUNT_REMOVE] = { .name = "remove", .type = BLOBMSG_TYPE_INT32 },
+	[MOUNT_DEVNO] = { .name = "devno", .type = BLOBMSG_TYPE_STRING },
 };
 
 enum {
 	INFO_DEVICE,
+	INFO_DEVNO,
 	__INFO_MAX
 };
 
 static const struct blobmsg_policy info_policy[__INFO_MAX] = {
 	[INFO_DEVICE] = { .name = "device", .type = BLOBMSG_TYPE_STRING },
+	[INFO_DEVNO]  = { .name = "devno", .type = BLOBMSG_TYPE_STRING },
 };
 
 static char*
@@ -255,6 +260,19 @@ static void vlist_nop_update(struct vlist_tree *tree,
 
 VLIST_TREE(devices, avl_strcmp, vlist_nop_update, false, false);
 
+/* List is short, not worth custom compare for secondary key */
+static struct device *find_device_by_devno(char *devno)
+{
+	struct device *device = NULL, *d;
+	vlist_for_each_element(&devices, d, node) {
+		if (!strcmp(d->devno, devno)) {
+			device = d;
+			break;
+		}
+	}
+	return device;
+}
+
 static int
 block_hotplug(struct ubus_context *ctx, struct ubus_object *obj,
 	      struct ubus_request_data *req, const char *method,
@@ -266,6 +284,7 @@ block_hotplug(struct ubus_context *ctx, struct ubus_object *obj,
 	char *devname, *_name;
 	char *target = NULL, *__target;
 	char *_target = NULL;
+	char *devno = NULL, *_devno;
 
 	blobmsg_parse(mount_policy, __MOUNT_MAX, data, blob_data(msg), blob_len(msg));
 
@@ -284,11 +303,22 @@ block_hotplug(struct ubus_context *ctx, struct ubus_object *obj,
 		target = _target;
 	}
 
-	if (data[MOUNT_REMOVE])
+	if (data[MOUNT_DEVNO]) {
+		devno = blobmsg_get_string(data[MOUNT_DEVNO]);
+	} else {
+		devno = "<none>";
+	}
+
+	if (data[MOUNT_REMOVE]) {
 		device = vlist_find(&devices, devname, device, node);
-	else
+		/* devname not found, try devno we may have wrong alias */
+		if (!device && data[MOUNT_DEVNO]) {
+			device = find_device_by_devno(devno);
+		}
+	} else
 		device = calloc_a(sizeof(*device), &_msg, blob_raw_len(msg),
-				  &_name, strlen(devname) + 1, &__target, strlen(target) + 1);
+				  &_name, strlen(devname) + 1, &__target, strlen(target) + 1,
+				  &_devno, strlen(devno) + 1);
 
 	if (!device) {
 		if (_target)
@@ -316,11 +346,40 @@ block_hotplug(struct ubus_context *ctx, struct ubus_object *obj,
 		memcpy(_msg, msg, blob_raw_len(msg));
 		device->name = _name;
 		strcpy(_name, devname);
+		device->devno = _devno;
+		strcpy(_devno, devno);
 		device->target = __target;
 		strcpy(__target, target);
 		if (_target)
 			free(_target);
 
+		/*
+		 * This could happen for two reasons:
+		 *   -- bad algorithm sends plug-in for both device and alias.
+		 *      ( replace and ignore ).
+		 *   -- we missed the plug-out event and the devno has been
+		 *      recycled to a new device.
+		 *      ( notify clients of missing plug-out )
+		 * We can't tell the difference so complain that both are a bug.
+		 *
+		 * Since devno is a secondary key duplicates are possible unless
+		 * we detect and correct them. the duplicate or future hotplug-out will fail.
+		 *
+		 * To track synthetic devices just ommit devno parameter to skip check.
+		 */
+		if (data[MOUNT_DEVNO]) {
+			struct device *d = find_device_by_devno(devno);
+			if (d && (d != old)) {
+				ULOG_ERR("FIX HOTPLUG, Renaming %s->%s may confuse clients\n",
+					 d->name, device->name);
+				ULOG_ERR("did we miss a remove for %s ?\n",
+					 devno);
+				/* Remove old node manually since keys mis-match */
+				vlist_delete(&devices, &d->node);
+			}
+			if (!old)
+				old = d;
+		}
 		vlist_add(&devices, &device->node, device->name);
 
 		if (old && !device_move(old, device)) {
@@ -435,11 +494,17 @@ block_info(struct ubus_context *ctx, struct ubus_object *obj,
 {
 	struct blob_attr *data[__INFO_MAX];
 	struct device *device = NULL;
+	char *devno;
 
 	blobmsg_parse(info_policy, __INFO_MAX, data, blob_data(msg), blob_len(msg));
 
 	if (data[INFO_DEVICE]) {
 		device = vlist_find(&devices, blobmsg_get_string(data[INFO_DEVICE]), device, node);
+		if (!device)
+			return UBUS_STATUS_INVALID_ARGUMENT;
+	} else if (data[INFO_DEVNO]) {
+		devno = blobmsg_get_string(data[INFO_DEVNO]);
+		device = find_device_by_devno(devno);
 		if (!device)
 			return UBUS_STATUS_INVALID_ARGUMENT;
 	}

@@ -939,6 +939,7 @@ static int blockd_notify(const char *method, char *device, struct mount *m,
 	if (!ubus_lookup_id(ctx, "block", &id)) {
 		struct blob_buf buf = { 0 };
 		char *d = strrchr(device, '/');
+		char *devno = NULL;
 
 		if (d)
 			d++;
@@ -947,8 +948,13 @@ static int blockd_notify(const char *method, char *device, struct mount *m,
 
 		blob_buf_init(&buf, 0);
 
-		if (m) {
+		if (pr)
+			if (asprintf(&devno, "%d:%d",
+				     major(pr->st_rdev),
+				     minor(pr->st_rdev)) == -1)
+				exit(ENOMEM);
 
+		if (m) {
 			blobmsg_add_string(&buf, "device", d);
 			if (m->uuid)
 				blobmsg_add_string(&buf, "uuid", m->uuid);
@@ -964,6 +970,7 @@ static int blockd_notify(const char *method, char *device, struct mount *m,
 				blobmsg_add_string(&buf, "type", pr->type);
 			if (pr->version)
 				blobmsg_add_string(&buf, "version", pr->version);
+			blobmsg_add_string(&buf, "devno", devno);
 		} else if (pr) {
 			blobmsg_add_string(&buf, "device", d);
 			if (pr->uuid)
@@ -975,11 +982,14 @@ static int blockd_notify(const char *method, char *device, struct mount *m,
 			if (pr->version)
 				blobmsg_add_string(&buf, "version", pr->version);
 			blobmsg_add_u32(&buf, "anon", 1);
+			blobmsg_add_string(&buf, "devno", devno);
 		} else {
 			blobmsg_add_string(&buf, "device", d);
 			blobmsg_add_u32(&buf, "remove", 1);
 		}
 
+		if (devno)
+			free(devno);
 		err = ubus_invoke(ctx, id, method, buf.head, NULL, NULL, 3000);
 	} else {
 		err = -ENOENT;
